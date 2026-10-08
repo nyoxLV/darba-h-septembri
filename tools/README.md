@@ -46,7 +46,25 @@ pārbīda šūnas, formulas (koplietotās pārvērš parastās), sapludinājumus
 nosacījuma formatējumu, piezīmes un VML, izmēru, atlasi, lapas pārtraukumus; 8. rindas dienas
 sapludinājums tiek pagarināts; `calcChain.xml` tiek dzēsts (Excel to izveido no jauna).
 
-`insert_day_cols.py <ieeja.xlsm> <izeja.xlsm> 4 7 15` — +1 kolonna norādītajām dienām. Skripts pats
-pārbauda, ka visas formulu vērtības un konstantes pēc pārbīdes ir nemainīgas.
+`insert_day_cols.py <ieeja.xlsm> <izeja.xlsm> 4 7 15 16 16` — +1 kolonna norādītajām dienām (diena
+atkārtota N reizes → +N kolonnas). Skripts pats pārbauda, ka visas formulu vērtības un konstantes pēc
+pārbīdes ir nemainīgas.
+
+## Personu filtrs
+
+`add_person_filter.py <ieeja.xlsm> <izeja.xlsm> [--keep "Vārds Uzvārds;..."] [--names-from <fails.xlsm>]`
+ieliek Excel automātisko filtru uz vārdu kolonnas (`B8:B131`). Redzamas paliek rindas, kurās mēneša
+dienu režģī ir stundas vai statuss, plus `--keep` vārdi; pārējās rindas tiek paslēptas (ne dzēstas),
+tāpēc formulas un kopsummas nemainās. Excelī: B8 bultiņa → ieķeksē / atķeksē personas.
+Palīgrindas ārpus 9.–131. rindas paliek, kā bija. `--names-from` ņem to pašu personu sarakstu no
+cita faila (piem. nākamajam mēnesim).
+
+## Audits
+
+`audit_all.py <fails.xlsm> [gads mēnesis] [--alias aliases.json]` — tikai lasa un izdrukā: stundas
+bez objekta krāsas, piezīmes objekts ≠ šūnas krāsas objekts, stundas / statusi brīvdienās, diena
+> 12 h, statuss + stundas vienā dienā, "Stundu pārbaude" ≠ 0, EDLUS spoguļrinda ≠ pamatrinda, un
+katra cilvēka mēneša stundas. `aliases.json` = `{"Objekta nosaukums": ["atslēgvārds", ...]}`
+(neobligāts; objektu atpazīšanai piezīmēs).
 
 Mēneša aizpildes skripti ar darbinieku datiem šeit **netiek glabāti** (repozitorijs ir publisks).
