@@ -39,4 +39,14 @@ Septembrī 2026 pārbaudīts pret 12 602 Excel saglabātajām formulu vērtībā
 Ar šiem rīkiem var arī sagatavot jauna mēneša failu no iepriekšējā: pārsaukt lapu, iztīrīt dienu
 režģi un piezīmes, pārkrāsot brīvdienas pēc jaunā kalendāra.
 
+## Kolonnu ievietošana
+
+`insert_columns(parts, [(pos, k), ...])` ievieto `k` kolonnas pirms kolonnas `pos` lapā "Darbs":
+pārbīda šūnas, formulas (koplietotās pārvērš parastās), sapludinājumus, kolonnu platumus,
+nosacījuma formatējumu, piezīmes un VML, izmēru, atlasi, lapas pārtraukumus; 8. rindas dienas
+sapludinājums tiek pagarināts; `calcChain.xml` tiek dzēsts (Excel to izveido no jauna).
+
+`insert_day_cols.py <ieeja.xlsm> <izeja.xlsm> 4 7 15` — +1 kolonna norādītajām dienām. Skripts pats
+pārbauda, ka visas formulu vērtības un konstantes pēc pārbīdes ir nemainīgas.
+
 Mēneša aizpildes skripti ar darbinieku datiem šeit **netiek glabāti** (repozitorijs ir publisks).

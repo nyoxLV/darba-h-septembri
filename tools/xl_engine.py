@@ -697,3 +697,144 @@ def day_groups(sh: "Sheet") -> dict:
         if isinstance(v, float) and 1 <= v <= 31:
             groups[int(v)] = list(range(c1, c2 + 1))
     return groups
+
+
+# ----------------------------------------------------------------------------- kolonnu ievietošana
+def _remap_refs(text: str, fc) -> str:
+    """Pārraksta šūnu atsauces formulā / diapazonā: kolonna c -> fc(c). Teksts pēdiņās netiek aiztikts."""
+    parts = re.split(r'("(?:[^"]|"")*")', text)
+    for i in range(0, len(parts), 2):
+        seg = parts[i]
+
+        def sh(m, seg=seg):
+            if m.start() > 0 and (seg[m.start() - 1].isalnum() or seg[m.start() - 1] in "_."):
+                return m.group(0)
+            ca, col, ra, row = m.groups()
+            return f"{ca}{n2col(fc(col2n(col)))}{ra}{row}"
+        parts[i] = REF_RE.sub(sh, seg)
+    return "".join(parts)
+
+
+def insert_columns(parts: dict, inserts: list[tuple[int, int]], extend_merge_row: int = 8) -> dict:
+    """Ievieto kolonnas lapā sheet1. inserts = [(pos, k)]: k jaunas kolonnas PIRMS kolonnas `pos`
+    (1-bāzēta, vecā numerācija). Jaunās šūnas saņem kreisās kaimiņšūnas stilu; 8. rindas
+    sapludinājums, kas beidzas tieši pirms `pos`, tiek pagarināts. Koplietotās formulas tiek
+    pārvērstas parastās. calcChain tiek dzēsts (Excel to atjauno)."""
+    inserts = sorted(inserts)
+
+    def fc(c):
+        return c + sum(k for p, k in inserts if c >= p)
+
+    sheet = parts["xl/worksheets/sheet1.xml"]
+    sst = SST(parts["xl/sharedStrings.xml"])
+    styles = Styles(parts["xl/styles.xml"], parts["xl/theme/theme1.xml"])
+    sh = Sheet(sheet, sst, styles)
+
+    # --- sheetData ---
+    def cell_xml(c: Cell, newref: str) -> str:
+        attrs = re.sub(r'\s*r="[^"]*"', "", c.attrs)
+        inner = c.inner or ""
+        if c.f is not None:
+            fm = re.search(r'<f([^>]*)>(.*?)</f>', inner, re.S) or re.search(r'<f([^>]*)/>', inner)
+            fa = dict(re.findall(r'(\w+)="([^"]*)"', fm.group(1)))
+            keep = []
+            if fa.get("t") == "array":
+                a, b = (fa["ref"].split(":") + [fa["ref"]])[:2]
+                keep.append(f't="array" ref="{_remap_refs(fa["ref"], fc)}"')
+            if fa.get("ca") == "1":
+                keep.append('ca="1"')
+            ftxt = html.escape(_remap_refs(c.f, fc), quote=False)
+            newf = f'<f{(" " + " ".join(keep)) if keep else ""}>{ftxt}</f>'
+            inner = inner[:fm.start()] + newf + inner[fm.end():]
+        return f'<c r="{newref}"{attrs}>{inner}</c>' if inner else f'<c r="{newref}"{attrs}/>'
+
+    by_row: dict[int, list[Cell]] = {}
+    for (r, c), cell in sh.cells.items():
+        by_row.setdefault(r, []).append(cell)
+
+    def row_repl(m):
+        rattrs, body = m.group(1), m.group(2)
+        r = int(re.search(r'\br="(\d+)"', rattrs).group(1))
+        rattrs = re.sub(r'\s*spans="[^"]*"', "", rattrs)
+        cells = {cell.c: cell for cell in by_row.get(r, [])}
+        out = []
+        for c in sorted(cells):
+            out.append((fc(c), cell_xml(cells[c], f"{n2col(fc(c))}{r}")))
+        for p, k in inserts:
+            left = cells.get(p - 1)
+            if left is not None:
+                for j in range(k):
+                    nc = fc(p - 1) + 1 + j
+                    out.append((nc, f'<c r="{n2col(nc)}{r}"{(" s=" + chr(34) + str(left.s) + chr(34)) if left.s is not None else ""}/>'))
+        out.sort()
+        return f"<row{rattrs}>" + "".join(x for _, x in out) + "</row>"
+
+    head, rest = sheet.split("<sheetData>", 1)
+    data, tail = rest.split("</sheetData>", 1)
+    data = re.sub(r'<row((?:[^>/]|/(?!>))*)>(.*?)</row>', row_repl, data, flags=re.S)
+    data = re.sub(r'<row([^>]*?)/>', lambda m: f"<row{re.sub(r' spans=.[^ ]*.', '', m.group(1))}/>", data)
+
+    # --- head: dimension, selection, pane, cols ---
+    head = re.sub(r'(<dimension ref=")([^"]+)"', lambda m: m.group(1) + _remap_refs(m.group(2), fc) + '"', head)
+    head = re.sub(r'((?:activeCell|topLeftCell|sqref)=")([^"]+)"', lambda m: m.group(1) + _remap_refs(m.group(2), fc) + '"', head)
+    cols = re.findall(r'<col [^>]*/>', head)
+    newcols = []
+    for x in cols:
+        a = dict(re.findall(r'(\w+)="([^"]*)"', x))
+        mn, mx = int(a["min"]), int(a["max"])
+        nmn = fc(mn)
+        nmx = fc(mx)  # ja ievietošana ir starp min un max, diapazons izstiepjas un pārklāj jaunās kolonnas
+        x2 = re.sub(r'min="\d+"', f'min="{nmn}"', re.sub(r'max="\d+"', f'max="{nmx}"', x))
+        newcols.append((nmn, nmx, x2))
+    covered = set()
+    for mn, mx, _ in newcols:
+        covered.update(range(mn, mx + 1))
+    for p, k in inserts:
+        for j in range(k):
+            nc = fc(p - 1) + 1 + j
+            if nc not in covered:
+                src = next((x for mn, mx, x in newcols if mn <= fc(p - 1) <= mx), None)
+                if src:
+                    newcols.append((nc, nc, re.sub(r'min="\d+"', f'min="{nc}"', re.sub(r'max="\d+"', f'max="{nc}"', src))))
+    newcols.sort()
+    head = re.sub(r'<cols>.*</cols>', lambda _: "<cols>" + "".join(x for _, _, x in newcols) + "</cols>", head, flags=re.S)
+
+    # --- tail: merges, CF, colBreaks ---
+    def merge_repl(m):
+        ref = _remap_refs(m.group(1), fc)
+        a, b = ref.split(":")
+        (ac, ar), (bc, br) = re.match(r'([A-Z]+)(\d+)', a).groups(), re.match(r'([A-Z]+)(\d+)', b).groups()
+        if int(ar) == int(br) == extend_merge_row:
+            old_end = None
+            for p, k in inserts:
+                if col2n(bc) == fc(p - 1):
+                    bc = n2col(col2n(bc) + k)
+        return f'<mergeCell ref="{ac}{ar}:{bc}{br}"/>'
+    tail = re.sub(r'<mergeCell ref="([^"]+)"/>', merge_repl, tail)
+    tail = re.sub(r'(<conditionalFormatting sqref=")([^"]+)"', lambda m: m.group(1) + _remap_refs(m.group(2), fc) + '"', tail)
+    tail = re.sub(r'(<formula>)(.*?)(</formula>)', lambda m: m.group(1) + html.escape(_remap_refs(html.unescape(m.group(2)), fc), quote=False) + m.group(3), tail)
+    tail = re.sub(r'(<brk id=")(\d+)"', lambda m: m.group(1) + str(fc(int(m.group(2)))) + '"', tail)
+    out = dict(parts)
+    out["xl/worksheets/sheet1.xml"] = head + "<sheetData>" + data + "</sheetData>" + tail
+
+    # --- piezīmes ---
+    out["xl/comments1.xml"] = re.sub(r'(<comment ref=")([A-Z]+\d+)"', lambda m: m.group(1) + _remap_refs(m.group(2), fc) + '"', parts["xl/comments1.xml"])
+
+    def vml_shape(m):
+        s = m.group(0)
+        s = re.sub(r'<x:Column>(\d+)</x:Column>', lambda q: f"<x:Column>{fc(int(q.group(1)) + 1) - 1}</x:Column>", s)
+
+        def anc(q):
+            v = [int(t) for t in q.group(1).split(",")]
+            v[0] = fc(v[0] + 1) - 1
+            v[4] = fc(v[4] + 1) - 1
+            return "<x:Anchor>\n    " + ", ".join(str(t) for t in v) + "</x:Anchor>"
+        return re.sub(r'<x:Anchor>\s*([\d,\s]+?)</x:Anchor>', anc, s)
+    out["xl/drawings/vmlDrawing1.vml"] = re.sub(r'<v:shape [^>]*>(?:(?!</v:shape>).)*</v:shape>', vml_shape,
+                                                parts["xl/drawings/vmlDrawing1.vml"], flags=re.S)
+
+    # --- calcChain dzēšana ---
+    out.pop("xl/calcChain.xml", None)
+    out["[Content_Types].xml"] = re.sub(r'<Override PartName="/xl/calcChain.xml"[^>]*/>', "", parts["[Content_Types].xml"])
+    out["xl/_rels/workbook.xml.rels"] = re.sub(r'<Relationship [^>]*Target="calcChain.xml"[^>]*/>', "", parts["xl/_rels/workbook.xml.rels"])
+    return out
