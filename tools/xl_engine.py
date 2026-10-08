@@ -14,6 +14,7 @@ Pārbaude: `verify()` pārrēķina VISAS formulas un salīdzina ar Excel saglab�
 from __future__ import annotations
 
 import html
+import math
 import re
 
 CELL_RE = re.compile(r'<c r="([A-Z]+)(\d+)"([^>]*?)(?:/>|>(.*?)</c>)', re.S)
@@ -673,17 +674,19 @@ class Notes:
         self.xml = self.xml[:pos] + x + self.xml[pos:]
         sid = max([int(i) for i in re.findall(r'_x0000_s(\d+)', self.vml)] or [1024]) + 1
         z = max([int(i) for i in re.findall(r'z-index:(\d+)', self.vml)] or [0]) + 1
-        r0, c0, lines = r - 1, c - 1, text.count("\n") + 1
+        # lodziņa izmērs: ~60 zīmes rindā pie 360 pt (Calibri 11), garās rindas aplaužas
+        r0, c0 = r - 1, c - 1
+        lines = sum(max(1, math.ceil(len(t) / 60)) for t in text.split("\n"))
         self.vml = self.vml.replace("</xml>", (
             f'<v:shape id="_x0000_s{sid}" type="#_x0000_t202" style=\'position:absolute;\n'
-            f'  margin-left:0pt;margin-top:0pt;width:300pt;height:{15 * lines + 2.25}pt;\n'
+            f'  margin-left:0pt;margin-top:0pt;width:360pt;height:{15 * lines + 2.25}pt;\n'
             f'  z-index:{z};visibility:hidden;mso-wrap-style:square\' fillcolor="infoBackground [80]"\n'
             f'  strokecolor="none [81]" o:insetmode="auto">\n  <v:fill color2="infoBackground [80]"/>\n'
             f'  <v:shadow color="none [81]" obscured="t"/>\n  <v:path o:connecttype="none"/>\n'
             f'  <v:textbox style=\'mso-direction-alt:auto;mso-fit-shape-to-text:t\'>\n'
             f'   <div style=\'text-align:left\'></div>\n  </v:textbox>\n'
             f'  <x:ClientData ObjectType="Note">\n   <x:MoveWithCells/>\n   <x:SizeWithCells/>\n'
-            f'   <x:Anchor>\n    {c0 + 1}, 3, {max(0, r0 - 1)}, 20, {c0 + 11}, 10, {r0 + lines - 1}, 14</x:Anchor>\n'
+            f'   <x:Anchor>\n    {c0 + 1}, 3, {max(0, r0 - 1)}, 20, {c0 + 13}, 10, {r0 + lines}, 14</x:Anchor>\n'
             f'   <x:AutoFill>False</x:AutoFill>\n   <x:Row>{r0}</x:Row>\n   <x:Column>{c0}</x:Column>\n'
             f'  </x:ClientData>\n </v:shape>') + "</xml>")
 
