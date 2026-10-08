@@ -31,6 +31,12 @@ Septembrī 2026 pārbaudīts pret 12 602 Excel saglabātajām formulu vērtībā
 * `sh.set_cell(r, c, value, style)` — konstante (skaitlis / teksts / `None`);
 * `styles.xf_with_fill(style, fill_id)` — tas pats stils ar citu fona krāsu (objekta krāsa
   vai `0` statusiem `Atv.` / `SA` / `SB`);
-* `sh.dump(sh.recalc())` — jaunais `sheet1.xml` + saraksts ar mainītajām formulu vērtībām.
+* `sh.dump(sh.recalc())` — jaunais `sheet1.xml` + saraksts ar mainītajām formulu vērtībām
+  (arī Excel kļūdas, piem. `#DIV/0!` tukšā rindā, tiek ierakstītas kā `t="e"`);
+* `Notes(comments_xml, vml)` — piezīmju pievienošana / dzēšana (`add`, `drop`, `drop_many`);
+* `day_groups(sh)` — dienu grupas pēc 8. rindas sapludinātajām šūnām (1..31).
+
+Ar šiem rīkiem var arī sagatavot jauna mēneša failu no iepriekšējā: pārsaukt lapu, iztīrīt dienu
+režģi un piezīmes, pārkrāsot brīvdienas pēc jaunā kalendāra.
 
 Mēneša aizpildes skripti ar darbinieku datiem šeit **netiek glabāti** (repozitorijs ir publisks).

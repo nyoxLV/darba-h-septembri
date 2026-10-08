@@ -353,7 +353,15 @@ class Sheet:
             changed.append((k, ov, nv))
             raw = self.xml[cell.start:cell.end]
             if isinstance(nv, XLError):
-                raise RuntimeError(f"{n2col(k[1])}{k[0]}: formula dod kļūdu {nv}")
+                code = str(nv)
+                if code not in ("#DIV/0!", "#REF!", "#VALUE!", "#N/A", "#NUM!", "#NULL!", "#NAME?"):
+                    raise RuntimeError(f"{n2col(k[1])}{k[0]}: formula dod nezināmu kļūdu {nv}")
+                raw2 = re.sub(r'\s*t="(?:str|e|b)"', "", raw, count=1)
+                raw2 = re.sub(r'^(<c [^>]*?)(\s*/?>)', r'\1 t="e"\2', raw2, count=1)
+                newraw = re.sub(r'<v>.*?</v>', f"<v>{code}</v>", raw2, flags=re.S) if "<v>" in raw2 \
+                    else raw2.replace("</c>", f"<v>{code}</v></c>")
+                repl[k] = newraw
+                continue
             if isinstance(nv, str):
                 newraw = re.sub(r'<v>.*?</v>', f"<v>{html.escape(nv, quote=False)}</v>", raw, flags=re.S)
             else:
@@ -607,3 +615,85 @@ class Evaluator:
                     t += nv
             return t
         raise XLError(f"#NAME?({name})")
+
+
+# ----------------------------------------------------------------------------- piezīmes (comments + VML)
+class Notes:
+    """Šūnu piezīmes: xl/comments1.xml + xl/drawings/vmlDrawing1.vml (Excel formātā)."""
+
+    def __init__(self, comments_xml: str, vml: str):
+        self.xml, self.vml = comments_xml, vml
+
+    @staticmethod
+    def _ref(r, c):
+        return f"{n2col(c)}{r}"
+
+    def refs(self):
+        out = []
+        for m in re.finditer(r'<comment ref="([A-Z]+)(\d+)"', self.xml):
+            out.append((int(m.group(2)), col2n(m.group(1))))
+        return out
+
+    def drop(self, r, c) -> bool:
+        self.xml, n = re.subn(r'<comment ref="%s" [^>]*>.*?</comment>' % self._ref(r, c), "", self.xml, flags=re.S)
+        if n:
+            pat = (r'<v:shape [^>]*>(?:(?!</v:shape>).)*?<x:Row>%d</x:Row>\s*<x:Column>%d</x:Column>.*?</v:shape>'
+                   % (r - 1, c - 1))
+            self.vml, m = re.subn(pat, "", self.vml, flags=re.S)
+            assert m == 1, f"VML forma {self._ref(r, c)}: {m}"
+        return bool(n)
+
+    def drop_many(self, cells) -> int:
+        cells = set(cells)
+        keep, n = [], 0
+        for m in re.finditer(r'<comment ref="([A-Z]+)(\d+)" [^>]*>.*?</comment>', self.xml, re.S):
+            if (int(m.group(2)), col2n(m.group(1))) in cells:
+                n += 1
+            else:
+                keep.append(m.group(0))
+        self.xml = re.sub(r'<commentList>.*</commentList>', lambda _: "<commentList>" + "".join(keep) + "</commentList>",
+                          self.xml, count=1, flags=re.S)
+        rc = {(r - 1, c - 1) for r, c in cells}
+
+        def shape(m):
+            rr = re.search(r'<x:Row>(\d+)</x:Row>\s*<x:Column>(\d+)</x:Column>', m.group(0))
+            return "" if rr and (int(rr.group(1)), int(rr.group(2))) in rc else m.group(0)
+        self.vml = re.sub(r'<v:shape [^>]*>(?:(?!</v:shape>).)*</v:shape>', shape, self.vml, flags=re.S)
+        return n
+
+    def add(self, r, c, text):
+        assert f'<comment ref="{self._ref(r, c)}"' not in self.xml
+        uids = [int(u[-8:], 16) for u in re.findall(r'xr:uid="\{([0-9A-F-]+)\}"', self.xml)] or [0]
+        uid = "{00000000-0006-0000-0000-%012X}" % (max(uids) + 1)
+        x = (f'<comment ref="{self._ref(r, c)}" authorId="0" shapeId="0" xr:uid="{uid}"><text><r><rPr><sz val="11"/>'
+             f'<color theme="1"/><rFont val="Calibri"/><scheme val="minor"/></rPr>'
+             f'<t>{html.escape(text, quote=False)}</t></r></text></comment>')
+        pos = next((m.start() for m in re.finditer(r'<comment ref="([A-Z]+)(\d+)"', self.xml)
+                    if (int(m.group(2)), col2n(m.group(1))) > (r, c)), self.xml.index("</commentList>"))
+        self.xml = self.xml[:pos] + x + self.xml[pos:]
+        sid = max([int(i) for i in re.findall(r'_x0000_s(\d+)', self.vml)] or [1024]) + 1
+        z = max([int(i) for i in re.findall(r'z-index:(\d+)', self.vml)] or [0]) + 1
+        r0, c0, lines = r - 1, c - 1, text.count("\n") + 1
+        self.vml = self.vml.replace("</xml>", (
+            f'<v:shape id="_x0000_s{sid}" type="#_x0000_t202" style=\'position:absolute;\n'
+            f'  margin-left:0pt;margin-top:0pt;width:300pt;height:{15 * lines + 2.25}pt;\n'
+            f'  z-index:{z};visibility:hidden;mso-wrap-style:square\' fillcolor="infoBackground [80]"\n'
+            f'  strokecolor="none [81]" o:insetmode="auto">\n  <v:fill color2="infoBackground [80]"/>\n'
+            f'  <v:shadow color="none [81]" obscured="t"/>\n  <v:path o:connecttype="none"/>\n'
+            f'  <v:textbox style=\'mso-direction-alt:auto;mso-fit-shape-to-text:t\'>\n'
+            f'   <div style=\'text-align:left\'></div>\n  </v:textbox>\n'
+            f'  <x:ClientData ObjectType="Note">\n   <x:MoveWithCells/>\n   <x:SizeWithCells/>\n'
+            f'   <x:Anchor>\n    {c0 + 1}, 3, {max(0, r0 - 1)}, 20, {c0 + 11}, 10, {r0 + lines - 1}, 14</x:Anchor>\n'
+            f'   <x:AutoFill>False</x:AutoFill>\n   <x:Row>{r0}</x:Row>\n   <x:Column>{c0}</x:Column>\n'
+            f'  </x:ClientData>\n </v:shape>') + "</xml>")
+
+
+def day_groups(sh: "Sheet") -> dict:
+    """Dienu grupas: sapludinātie 8. rindas apgabali ar vērtību 1..31 -> kolonnu saraksts."""
+    groups = {}
+    for a, b in re.findall(r'<mergeCell ref="([A-Z]+8):([A-Z]+8)"/>', sh.xml):
+        c1, c2 = col2n(a[:-1]), col2n(b[:-1])
+        v = sh.value(8, c1)
+        if isinstance(v, float) and 1 <= v <= 31:
+            groups[int(v)] = list(range(c1, c2 + 1))
+    return groups
