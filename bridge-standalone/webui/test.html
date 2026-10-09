@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>APEX MACRO v9 — Bridge Test</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background:#14161f; color:#e8eaf2; font-family:'Segoe UI',system-ui,sans-serif; padding:18px; }
+  h1 { font-size:17px; letter-spacing:.5px; margin-bottom:4px; }
+  .sub { color:#8b90a6; font-size:12px; margin-bottom:14px; }
+  .grid { display:flex; gap:14px; flex-wrap:wrap; align-items:flex-start; }
+  .card { background:#1c1f2e; border:1px solid #2b3050; border-radius:8px; padding:14px; min-width:270px; }
+  .stats span { display:inline-block; margin-right:16px; font-size:13px; color:#aab0c9; }
+  .stats b { color:#fff; font-variant-numeric:tabular-nums; }
+  table { border-collapse:collapse; width:100%; font-size:12.5px; margin-top:8px; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid #2b3050; white-space:nowrap; }
+  th { color:#8b90a6; font-weight:600; }
+  .ok   { color:#4ade80; font-weight:700; }
+  .bad  { color:#f87171; font-weight:700; }
+  .pend { color:#facc15; }
+  button { background:#3b4a8f; border:none; color:#fff; padding:9px 16px; margin:4px 6px 4px 0;
+           border-radius:6px; font-size:13px; cursor:pointer; }
+  button:hover { background:#4c5da8; }
+  #console { width:100%; height:290px; overflow-y:auto; margin-top:14px; padding:10px;
+             background:#0d0f17; border:1px solid #2b3050; border-radius:8px;
+             font-family:'Cascadia Mono',Consolas,monospace; font-size:11.5px; line-height:1.55; }
+  .c-js { color:#60a5fa; }      /* JS→C++ */
+  .c-cp { color:#4ade80; }      /* C++→JS reply/event */
+  .c-sys{ color:#facc15; }
+</style>
+</head>
+<body>
+<h1>APEX MACRO v9 — BRIDGE TEST (standalone)</h1>
+<div class="sub">If the bridge works: every row below turns <span class="ok" style="color:#4ade80;font-weight:700">OK</span> within ~2 s of load, and C++ pushes appear in the console.</div>
+
+<div class="grid">
+  <div class="card stats" style="flex-basis:100%">
+    JS→C++ received by page listener: <b id="stRecv">0</b>&nbsp;&nbsp;|&nbsp;&nbsp;
+    replies matched to requests: <b id="stMatched">0</b>&nbsp;&nbsp;|&nbsp;&nbsp;
+    C++ pushes seen: <b id="stPushes">0</b> / 5&nbsp;&nbsp;|&nbsp;&nbsp;
+    listener attached at load: <b id="stListener">?</b>
+  </div>
+
+  <div class="card" style="flex:1; min-width:420px;">
+    <b style="font-size:13.5px">Auto-test (runs on load)</b>
+    <table id="results">
+      <tr><th>#</th><th>method</th><th>expected</th><th>received</th><th>ms</th></tr>
+    </table>
+  </div>
+
+  <div class="card" style="flex:1; min-width:300px;">
+    <b style="font-size:13.5px">Manual tests</b>
+    <p style="margin-top:8px">
+      <button onclick="pushTest()">C++ Push Test (×5)</button>
+      <button onclick="spam(50)">JS spam ×50</button>
+      <button onclick="ping()">Ping</button>
+    </p>
+  </div>
+</div>
+
+<div id="console"></div>
+
+<script>
+"use strict";
+const consoleEl = document.getElementById('console');
+function log(cls, text) {
+  const t = new Date().toTimeString().slice(0,12);
+  const line = document.createElement('div');
+  line.className = cls;
+  line.textContent = `[${t}] ${text}`;
+  consoleEl.appendChild(line);
+  while (consoleEl.children.length > 400) consoleEl.removeChild(consoleEl.firstChild);
+  consoleEl.scrollTop = consoleEl.scrollHeight;
+}
+
+// ─── Listener: attached IMMEDIATELY at script parse time (before any call) ──
+let recvCount = 0, matched = 0, pushes = 0;
+const pending = new Map();   // id → {t0, expected ('__ANY__' = accept anything), rowIdx}
+
+window.chrome.webview.addEventListener('message', (e) => {
+  let m; try { m = JSON.parse(e.data); } catch (_) { log('c-sys','unparseable message: '+String(e.data).slice(0,120)); return; }
+  recvCount++; document.getElementById('stRecv').textContent = recvCount;
+
+  if (m.type === 'push_test') {
+    pushes++; document.getElementById('stPushes').textContent = pushes + ' / 5';
+    log('c-cp', `C++→JS push event n=${m.n}`);
+    return;
+  }
+
+  const p = pending.get(m.id);
+  if (!p) { log('c-sys','reply for unknown id '+m.id+': '+String(e.data).slice(0,120)); return; }
+  pending.delete(m.id); matched++; document.getElementById('stMatched').textContent = matched;
+
+  const ms = (performance.now() - p.t0).toFixed(1);
+  const got = m.result !== undefined ? String(m.result) : JSON.stringify(m.error || m);
+  if (p.rowIdx >= 0) {
+    const cell = document.querySelector(`#row${p.rowIdx} td:nth-child(4)`);
+    const isOk = p.expected === '__ANY__' ? got.startsWith('pong') : got === p.expected;
+    if (isOk)      { cell.textContent = 'OK: '+got; cell.className = 'ok'; }
+    else           { cell.textContent = got+'  ≠ expected'; cell.className = 'bad'; }
+    document.querySelector(`#row${p.rowIdx} td:nth-child(5)`).textContent = ms;
+  }
+  log('c-cp', `C++→JS reply id=${m.id}: ${got}`);
+
+  // resolve any waiting promise (spam/ping use this)
+  if (waiters.has(m.id)) { waiters.get(m.id)(got, true); waiters.delete(m.id); }
+});
+
+document.getElementById('stListener').textContent = window.chrome.webview ? 'yes' : 'NO chrome.webview!';
+
+// ─── Bridge call helper (same shape as the real app's bridge.js) ──────────────
+const waiters = new Map();   // id → resolve(got, ok)
+function send(method, payload, expected, rowIdx, timeoutMs = 15000) {
+  return new Promise((resolve) => {
+    const id = Math.floor(Math.random() * 1e9);
+    pending.set(id, { t0: performance.now(), expected, rowIdx });
+    waiters.set(id, (got, ok) => resolve({ got, ok }));
+    window.chrome.webview.postMessage(JSON.stringify(payload === undefined ? { id, method } : { id, method, payload }));
+    setTimeout(() => { if (waiters.has(id)) { waiters.delete(id); pending.delete(id); resolve({ got: '__TIMEOUT__', ok: false }); } }, timeoutMs);
+  });
+}
+
+// ─── Auto-test table ──────────────────────────────────────────────────────
+const HWID_EXPECT = '1A3E-5745';   // C: volume serial on this machine (same as real app)
+async function autoTest() {
+  const rows = [ ['GetHWID', HWID_EXPECT], ['Echo', 'hello-bridge-v9'], ['Ping', '__ANY__'] ];
+  for (let i = 0; i < rows.length; i++) {
+    const tr = document.createElement('tr');
+    tr.id = 'row' + i;
+    tr.innerHTML = `<td>${i+1}</td><td>${rows[i][0]}</td><td>${rows[i][1] === '__ANY__' ? '(any pong)' : rows[i][1]}</td><td class="pend">…</td><td></td>`;
+    document.getElementById('results').appendChild(tr);
+  }
+  await send('GetHWID', undefined, HWID_EXPECT, 0);
+  await send('Echo', 'hello-bridge-v9', 'hello-bridge-v9', 1);
+  await send('Ping', undefined, '__ANY__', 2);
+}
+
+function pushTest() { log('c-sys','requesting C++ worker to push 5 events…'); send('PushTest', '', null, -1); }
+async function spam(n) { const t0 = performance.now(); for (let i=0;i<n;i++) await send('GetHWID', undefined, HWID_EXPECT, -1); log('c-sys',`sent ${n} GetHWID requests in ${(performance.now()-t0).toFixed(0)} ms`); }
+function ping() { const t0 = performance.now(); send('Ping', undefined, '__ANY__', -2).then(r => log(r.ok ? 'c-cp' : 'bad', `ping → ${r.got} (${(performance.now()-t0).toFixed(1)} ms)`)); }
+
+log('c-sys', 'page loaded — listener attached, starting auto-test in 1 s…');
+setTimeout(autoTest, 1000);
+</script>
+</body>
+</html>
