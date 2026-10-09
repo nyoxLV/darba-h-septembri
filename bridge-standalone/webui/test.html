@@ -36,7 +36,7 @@
 
 <div class="grid">
   <div class="card stats" style="flex-basis:100%">
-    JS→C++ received by page listener: <b id="stRecv">0</b>&nbsp;&nbsp;|&nbsp;&nbsp;
+    C++→JS received by page listener: <b id="stRecv">0</b>&nbsp;&nbsp;|&nbsp;&nbsp;
     replies matched to requests: <b id="stMatched">0</b>&nbsp;&nbsp;|&nbsp;&nbsp;
     C++ pushes seen: <b id="stPushes">0</b> / 5&nbsp;&nbsp;|&nbsp;&nbsp;
     listener attached at load: <b id="stListener">?</b>
@@ -79,8 +79,14 @@ let recvCount = 0, matched = 0, pushes = 0;
 const pending = new Map();   // id → {t0, expected ('__ANY__' = accept anything), rowIdx}
 
 window.chrome.webview.addEventListener('message', (e) => {
-  let m; try { m = JSON.parse(e.data); } catch (_) { log('c-sys','unparseable message: '+String(e.data).slice(0,120)); return; }
-  recvCount++; document.getElementById('stRecv').textContent = recvCount;
+  recvCount++; document.getElementById('stRecv').textContent = recvCount;   // count delivery before parsing
+  // PostWebMessageAsJson hands us e.data ALREADY PARSED into an object (only PostWebMessageAsString
+  // gives a string). JSON.parse(object) throws on "[object Object]", which silently dropped every reply.
+  let m = e.data;
+  if (typeof m === 'string') {
+    try { m = JSON.parse(m); } catch (_) { log('c-sys','unparseable message: '+m.slice(0,120)); return; }
+  }
+  if (!m || typeof m !== 'object') { log('c-sys','unexpected message: '+String(m).slice(0,120)); return; }
 
   if (m.type === 'push_test') {
     pushes++; document.getElementById('stPushes').textContent = pushes + ' / 5';
@@ -89,7 +95,7 @@ window.chrome.webview.addEventListener('message', (e) => {
   }
 
   const p = pending.get(m.id);
-  if (!p) { log('c-sys','reply for unknown id '+m.id+': '+String(e.data).slice(0,120)); return; }
+  if (!p) { log('c-sys','reply for unknown id '+m.id+': '+JSON.stringify(m).slice(0,120)); return; }
   pending.delete(m.id); matched++; document.getElementById('stMatched').textContent = matched;
 
   const ms = (performance.now() - p.t0).toFixed(1);

@@ -1,51 +1,77 @@
 # APEX MACRO v9 — Standalone Bridge Test Harness (no cheat code)
 
 Self-contained WebView2 C++ ↔ JS bridge reproduction. **No HID, no overlay, no weapon
-patterns** — only the exact part that keeps bugging: `chrome.webview.postMessage` from
-JS reaches C++, but C++ → JS replies (`PostWebMessageAsJson`) never reach the page's
-listener.
+patterns**, only the bridge part that was broken: `chrome.webview.postMessage` from
+JS reached C++, but C++ → JS replies (`PostWebMessageAsJson`) seemed to never reach the
+page's listener.
 
-## The bug (reproduced in isolation)
+## The symptom (as originally reported)
 
-Run it and watch both sides:
+- **Console** (C++ side): every JS message is received, and a reply is queued and flushed
+  at top level of the UI message loop via `PostWebMessageAsJson`. No FAILED log.
+- **Page** (JS side): the listener is attached at load (`listener=yes`), but after all three
+  auto-tests finish, the stats read `recv=0 matched=0 pushes=0`.
 
-- **Console** (C++ side): every JS message is received, a reply is queued, flushed at
-  top level of the UI message loop via `PostWebMessageAsJson`, which returns `S_OK`
-  (no FAILED log). So C++ *thinks* it delivered.
-- **Page** (JS side): listener attached at load (`listener=yes`), but after all three
-  auto-tests complete, stats read `recv=0 matched=0 pushes=0`. The page never sees a
-  single message from C++.
+## Root cause (FIXED)
 
-That's the whole bug: JS→C++ works, C++→JS silently drops. No cheat code involved — so
-whatever is wrong lives in how WebView2 / this environment delivers posted messages to
-the renderer.
+The messages were delivered every time; the page threw them away.
 
-## What I've already ruled out (don't re-test these)
+`PostWebMessageAsJson` delivers `event.data` **already parsed into a JS object**. That's
+documented in `WebView2.idl` ("The `data` property of the event arg is the `webMessage`
+string parameter parsed as a JSON string into a JavaScript object"). Only
+`PostWebMessageAsString` delivers a string. The listener did:
 
-1. **Re-entrancy** — replies are NOT posted inside the `WebMessageReceived` callback.
-   They're queued and flushed at top level of the message loop (`WM_APP_BRIDGE_FLUSH`).
-   Still broken, so it's not a re-entrant-post issue.
-2. **Wrong HRESULT** — every `PostWebMessageAsJson` returns `S_OK`. Not an API failure.
-3. **Listener timing** — the page attaches its listener at script parse time (before any
-   call), and confirms `listener=yes`. The auto-test fires 1 s after load, well after attach.
-4. **Multiple controllers / wrong environment** — single env, single controller, one window.
+```js
+let m; try { m = JSON.parse(e.data); } catch (_) { log('unparseable message: ...'); return; }
+recvCount++;
+```
 
-## What's still untested (the likely culprits)
+`JSON.parse(object)` coerces the object to `"[object Object]"` and throws. The `catch`
+returned *before* `recvCount++`, so `recv`/`matched`/`pushes` stayed at `0` and every
+request timed out after 15 s. The page's own console div showed
+`unparseable message: [object Object]` for each reply, but `cdp_read.js` only reads the
+table and stats, so that line never showed up in `_verify.bat` output.
 
-- **`--disable-gpu`** in the browser args. This is a strong suspect: with GPU disabled,
-  WebView2 can run in a degraded mode where posted messages to the renderer get dropped or
-  delayed. The real app passes `L"--disable-gpu --remote-debugging-port=9333"`.
-- **`--remote-debugging-port=9333`** — CDP attach may interfere with message delivery on some builds.
+`--disable-gpu`, `--remote-debugging-port`, threading and re-entrancy are **not**
+involved. The original flags work fine.
 
-Use `_verify.bat [args]` to A/B test without recompiling:
+### Fix (in `webui/test.html`)
+
+```js
+window.chrome.webview.addEventListener('message', (e) => {
+  recvCount++; ...                       // count delivery before parsing
+  let m = e.data;                        // already an object with PostWebMessageAsJson
+  if (typeof m === 'string') { try { m = JSON.parse(m); } catch (_) { ...; return; } }
+  ...
+```
+
+**Porting to the real app:** apply the same change wherever the real web UI (e.g. its
+`bridge.js`) does `JSON.parse(e.data)` / `JSON.parse(event.data)` in its
+`chrome.webview` `message` listener. Alternatively, switch the C++ side to
+`PostWebMessageAsString`. Then `e.data` is a string and the existing `JSON.parse` works.
+Don't do both. The tolerant listener above handles either.
+
+### Other harness bugs fixed along the way (`src/main.cpp`)
+
+1. **The HRESULT was never checked.** `FlushResponses()` ignored `PostWebMessageAsJson`'s
+   return value and set `hr = S_OK` itself (COM doesn't throw, so the `try/catch` did
+   nothing). The earlier "every call returns S_OK" observation was never actually measured.
+   The return value is now checked and logged.
+2. **Invalid JSON for unknown methods.** The error reply had a doubled quote
+   (`"unknown method: X""}`), which `PostWebMessageAsJson` rejects with `E_INVALIDARG`.
+   Replies without an `id` were invalid JSON too (`{"id":,...}`).
+3. **WebView never sized.** `put_Bounds` was never called, so the WebView wasn't fitted to
+   the window. It's now set at creation and on `WM_SIZE`.
+4. **Empty console window.** A WIN32-subsystem exe has no CRT stdout after `AllocConsole()`,
+   so logs only appeared when `_verify.bat` redirected them to `stdout.log`. stdout is now
+   bound to the console when it isn't already redirected.
+
+Use `_verify.bat [args]` to check flag combinations without recompiling:
 
 ```bat
 _verify.bat                                   :: default = --disable-gpu + port 9333 (real app)
-_verify.bat "--remote-debugging-port=9333"    :: CDP only, no GPU disable   <-- try this first
-_verify.bat ""                                :: NO extra flags at all       <-- then this
+_verify.bat "--remote-debugging-port=9333"    :: CDP only, no GPU disable
 ```
-
-If `recv` goes from `0` to a non-zero number when you drop `--disable-gpu`, that's the fix.
 
 ## Files
 
@@ -79,5 +105,6 @@ A working bridge shows, in `_verify.bat` output:
 "stats":["recv=3","matched=3","pushes=0 / 5","listener=yes"]
 ```
 
-`recv` and `matched` must be non-zero. If they are, the C++→JS path is fixed — port that
-change back into `E:\APEX_MACRO_V9\cpp\src\bridge.cpp`.
+`recv` and `matched` must be non-zero. If they are, the C++→JS path is fixed. Port the
+listener change (see **Root cause** above) into the real app's web UI. The C++ side in
+`E:\APEX_MACRO_V9\cpp\src\bridge.cpp` only needs the HRESULT check.

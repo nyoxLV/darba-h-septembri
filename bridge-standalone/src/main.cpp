@@ -132,12 +132,10 @@ static void FlushResponses() {
     if (!batch.empty()) Log("[bridge] flush: %d message(s) at top level\n", (int)batch.size());
     while (!batch.empty()) {
         const std::wstring& w = batch.front();
-        HRESULT hr = E_UNEXPECTED;
-        try {
-            // NOTE: called OUTSIDE any WebView2 callback — the key difference vs. re-entrant posting.
-            g_webview->PostWebMessageAsJson(w.c_str());
-            hr = S_OK;
-        } catch (...) {}
+        // NOTE: called OUTSIDE any WebView2 callback — the key difference vs. re-entrant posting.
+        // COM reports failure through the HRESULT (it never throws), so the result must be checked —
+        // e.g. malformed JSON comes back as E_INVALIDARG.
+        HRESULT hr = g_webview ? g_webview->PostWebMessageAsJson(w.c_str()) : E_POINTER;
         if (SUCCEEDED(hr)) {
             g_stats.postedOk++;
         } else {
@@ -172,6 +170,7 @@ static void OnWebMessage(ICoreWebView2* /*sender*/, ICoreWebView2WebMessageRecei
         JsonField(utf8, "id", idStr);
         JsonField(utf8, "method", method);
         JsonField(utf8, "payload", payload);
+        if (idStr.empty()) idStr = "null";   // keep replies valid JSON even without an id
 
         // ── Test protocol handlers (mirror the real app's GetHWID/Echo) ────
         if (method == "GetHWID") {
@@ -190,7 +189,7 @@ static void OnWebMessage(ICoreWebView2* /*sender*/, ICoreWebView2WebMessageRecei
             std::thread(PushTestWorker).detach();
         } else {
             Log("[bridge] unknown method '%s' — replying with error\n", method.c_str());
-            PostReply("{\"id\":" + idStr + ",\"error\":\"unknown method: " + JsonStr(method).substr(1, 60) + "\"}");
+            PostReply("{\"id\":" + idStr + ",\"error\":" + JsonStr("unknown method: " + method.substr(0, 60)) + "}");
         }
 }
 
@@ -209,6 +208,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     switch (msg) {
     case WM_APP_BRIDGE_FLUSH:
         FlushResponses();   // top level of the UI loop — never re-entrant
+        return 0;
+    case WM_SIZE:
+        if (g_controller) { RECT rc; GetClientRect(hwnd, &rc); g_controller->put_Bounds(rc); }
         return 0;
     case WM_CLOSE: DestroyWindow(hwnd); return 0;
     case WM_DESTROY: PostQuitMessage(0); return 0;
@@ -229,6 +231,9 @@ static std::wstring GetTestUrl() {
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     AllocConsole();   // console window for logs (same as the real app)
+    // A WIN32-subsystem exe starts with no CRT stdout, so printf went nowhere unless the launcher
+    // redirected it (_verify.bat → stdout.log). Bind it to the new console only in that case.
+    if (_fileno(stdout) < 0) { FILE* con = nullptr; freopen_s(&con, "CONOUT$", "w", stdout); }
     SetConsoleTitleW(L"APEX MACRO v9 — Bridge Test Harness");
     Log("=================================================\n");
     Log("[harness] APEX MACRO v9 standalone bridge test\n");
@@ -285,6 +290,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
                             g_controller = controller;
                             g_controller->get_CoreWebView2(&g_webview);
                             g_controller->put_IsVisible(TRUE);
+                            RECT rc; GetClientRect(g_hwnd, &rc);
+                            g_controller->put_Bounds(rc);   // size the WebView to the window (WM_SIZE keeps it in sync)
 
                             ICoreWebView2Settings* settings = nullptr;
                             if (SUCCEEDED(g_webview->get_Settings(&settings)) && settings) {
